@@ -32,7 +32,7 @@ class PiCameraTrack(MediaStreamTrack):
         # picamera2에서 프레임(numpy array) 추출
         frame_np = self.camera.capture_array()
         # aiortc가 쓰는 av.VideoFrame으로 변환
-        # frame_np = frame_np[:, :, 1:4]  # X(패딩) 채널 제거하고 BGR만 유지
+        frame_np = frame_np[:, :, 1:4]  # X(패딩) 채널 제거하고 BGR만 유지
         # frame_np = cv2.cvtColor(frame_np, cv2.COLOR_XBGR2BGR)
         video_frame = av.VideoFrame.from_ndarray(frame_np, format='bgr24')
 
