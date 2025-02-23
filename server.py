@@ -1,62 +1,55 @@
-
 import asyncio
 import json
 import logging
-import cv2
 
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole
+from aiortc.contrib.media import MediaRecorder
 
 logging.basicConfig(level=logging.INFO)
-
-pcs = set()  # 활성화된 PeerConnection들을 저장
-
-
-async def index(request):
-    """ 단순 테스트용 GET """
-    return web.Response(text="WebRTC Server is running.")
-
+pcs = set()  # PeerConnection 관리를 위한 집합
 
 async def offer(request):
     """
-    클라이언트(라즈베리 파이)에서 Offer SDP를 JSON 형태로 POST하면,
-    서버에서 Answer SDP를 생성해 반환한다.
+    클라이언트로부터 Offer (SDP, type)를 받아 처리 후 Answer 반환
     """
     params = await request.json()
-    offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    offer_sdp = params["sdp"]
+    offer_type = params["type"]
 
     pc = RTCPeerConnection()
     pcs.add(pc)
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        print("PC connection state:", pc.connectionState)
-        if pc.connectionState == "failed":
+        print("Connection state is %s" % pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
             await pc.close()
             pcs.discard(pc)
 
     @pc.on("track")
-    def on_track(track):
-        print(f"Received {track.kind} track")
-
+    async def on_track(track):
+        print(f"Track kind={track.kind} is received")
         if track.kind == "video":
-            # 비디오 트랙이 들어오면 OpenCV 창에서 보여준다.
-            # 별도의 코루틴 실행
-            asyncio.ensure_future(show_video(track))
-        elif track.kind == "audio":
-            # 여기서는 오디오를 재생하지 않고 그냥 버림(MediaBlackhole) 처리
-            media_sink = MediaBlackhole()
-            media_sink.addTrack(track)
+            # 수신된 영상을 mp4로 파일에 저장(내부적으로 ffmpeg 사용)
+            recorder = MediaRecorder("received_video.mp4")
+            recorder.addTrack(track)
+            await recorder.start()
 
-    # 클라이언트 Offer 처리
-    await pc.setRemoteDescription(offer_sdp)
+            @track.on("ended")
+            async def on_ended():
+                print("Video track ended")
+                await recorder.stop()
 
-    # 서버가 Answer 생성
+    # 클라이언트 Offer 설정
+    offer_obj = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
+    await pc.setRemoteDescription(offer_obj)
+
+    # 서버 쪽 Answer 생성
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # Answer를 JSON으로 응답
+    # Answer SDP를 JSON 형태로 반환
     return web.Response(
         content_type="application/json",
         text=json.dumps({
@@ -66,33 +59,8 @@ async def offer(request):
     )
 
 
-async def show_video(track):
-    """
-    들어온 비디오 프레임을 계속해서 받아 OpenCV로 실시간 표시하는 코루틴.
-    """
-    while True:
-        try:
-            frame = await track.recv()
-        except:
-            break
-
-        # aiortc의 VideoFrame -> numpy 배열 (BGR)
-        img = frame.to_ndarray(format="bgr24")
-
-        # OpenCV 창에 표시
-        cv2.imshow("Received Video", img)
-        # 키 입력 대기 (GUI 이벤트 처리)
-        # 'q' 누르면 종료
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    track.stop()
-    cv2.destroyAllWindows()
-    print("Video display finished.")
-
-
 async def on_shutdown(app):
-    # 서버 종료 시 모든 PeerConnection 닫기
+    # 서버 종료 시 모든 PC 종료
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros)
     pcs.clear()
@@ -101,10 +69,11 @@ async def on_shutdown(app):
 def main():
     app = web.Application()
     app.on_shutdown.append(on_shutdown)
-    app.router.add_get("/", index)
+    # /offer 라우팅
     app.router.add_post("/offer", offer)
 
-    web.run_app(app, host="0.0.0.0", port=8080)
+    # 포트 5002로 서버 실행
+    web.run_app(app, host="0.0.0.0", port=5002)
 
 
 if __name__ == "__main__":
