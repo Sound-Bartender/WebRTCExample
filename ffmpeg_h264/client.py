@@ -2,7 +2,8 @@ import subprocess
 
 def send_video():
     # 수신(서버) 측 IP와 포트
-    SERVER_IP = "172.30.1.16"   # 예시: 서버 컴퓨터의 내부망 IP
+    # SERVER_IP = "172.30.1.16"   # 예시: 서버 컴퓨터의 내부망 IP
+    SERVER_IP = "192.168.50.236"   # 예시: 서버 컴퓨터의 내부망 IP
     SERVER_PORT = 5002
 
     width = 640
@@ -32,7 +33,7 @@ def send_video():
         "--width", f"{width}",
         "--height", f"{height}",
         "--framerate", f"{fps}",
-        "--intra", "5",
+        "--intra", "1",
         "--bitrate", f"{bitrate}"
         "--codec", "h264",
         "-o", "-",
