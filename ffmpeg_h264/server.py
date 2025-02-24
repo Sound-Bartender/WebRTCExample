@@ -18,7 +18,11 @@ def receive_video():
         "-i", f"udp://{LISTEN_IP}:{LISTEN_PORT}",  # 입력 소스
         "-f", "rawvideo",                          # 디코딩한 RAW 영상
         "-pix_fmt", "bgr24",                       # OpenCV가 바로 읽기 쉬운 BGR 포맷
-        "pipe:1"                                   # 파이프로 stdout
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-probesize", "32",
+        "-analyzeduration", "0",
+        "pipe:1",                                  # 파이프로 stdout
     ]
     
     ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=10**7)
