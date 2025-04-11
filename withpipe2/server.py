@@ -12,6 +12,9 @@ from aiortc.contrib.media import MediaPlayer, MediaRecorder, MediaRelay
 from aiortc.mediastreams import AudioStreamTrack, VideoStreamTrack
 from av import VideoFrame, AudioFrame
 import logging
+from fractions import Fraction
+from picamera2 import Picamera2
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rpi-webrtc")
@@ -22,8 +25,8 @@ FRAME_HEIGHT = 360
 FPS = 25
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1
-CHUNK_SIZE = 3200  # 0.2초 단위 (16000 * 0.2)
-FRAMES_PER_CHUNK = 5  # 0.2초 단위 (25fps * 0.2)
+CHUNK_SIZE = 640  # 0.04초 단위 (16000 * 0.2)
+FRAMES_PER_CHUNK = 1  # 0.04초 단위 (25fps * 0.2)
 
 # 오디오 재생 및 녹음 객체
 audio = pyaudio.PyAudio()
@@ -33,50 +36,45 @@ audio = pyaudio.PyAudio()
 class CameraVideoStreamTrack(VideoStreamTrack):
     def __init__(self):
         super().__init__()
-        self.camera = cv2.VideoCapture(0)
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        self.camera.set(cv2.CAP_PROP_FPS, FPS)
+        # self.camera = cv2.VideoCapture(0)
+        # self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+        # self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+        # self.camera.set(cv2.CAP_PROP_FPS, FPS)
+        self.picam2 = Picamera2()
+        # 540x360, RGB888 포맷 설정
+        config = self.picam2.create_preview_configuration(
+            main={
+                "size": (FRAME_WIDTH, FRAME_HEIGHT),
+                "format": "RGB888"
+            }
+        )
+        self.picam2.configure(config)
+        self.picam2.set_controls({"FrameRate": float(FPS)})
         self.frame_count = 0
         self.relay = MediaRelay()
-        self.frames_buffer = []
         self.last_frame_time = time.time()
 
+        self.current_time = None
+        self.picam2.start()
+
     async def recv(self):
-        # 0.2초마다 5프레임을 묶어서 전송
-        current_time = time.time()
-        if current_time - self.last_frame_time >= 0.2 or not self.frames_buffer:
-            # 5프레임 캡처
-            for _ in range(FRAMES_PER_CHUNK):
-                ret, frame = self.camera.read()
-                if not ret:
-                    logger.error("카메라로부터 프레임을 읽을 수 없습니다.")
-                    # 검은색 프레임 생성
-                    frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), np.uint8)
+        if self.current_time is None:
+            self.current_time = time.time()
 
-                # BGR에서 RGB로 변환
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.frames_buffer.append(frame)
+        frame = self.picam2.capture_array()  # shape: (height, width, 3)
 
-            self.last_frame_time = current_time
-
-        # 버퍼에서 프레임 하나 꺼내기
-        if self.frames_buffer:
-            frame = self.frames_buffer.pop(0)
-            # VideoFrame 객체 생성
-            video_frame = VideoFrame.from_ndarray(frame, format="rgb24")
-            video_frame.pts = self.frame_count
-            video_frame.time_base = 1 / FPS
-            self.frame_count += 1
-
-            return video_frame
-
-        # 프레임이 없는 경우 빈 프레임 반환
-        frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), np.uint8)
+        # VideoFrame 생성
         video_frame = VideoFrame.from_ndarray(frame, format="rgb24")
         video_frame.pts = self.frame_count
-        video_frame.time_base = 1 / FPS
+        video_frame.time_base = Fraction(1, FPS)
         self.frame_count += 1
+
+        to_sleep = (1 / FPS) - (time.time() - self.current_time)
+        if to_sleep > 0:
+            await asyncio.sleep(to_sleep)
+
+        self.current_time += 1 / FPS
+        # print("recv() 호출됨", self.current_time, self.frame_count, to_sleep)  # 디버그용
 
         return video_frame
 
@@ -91,30 +89,32 @@ class MicrophoneAudioStreamTrack(AudioStreamTrack):
         self.pts = 0
 
         # 마이크 설정
-        self.microphone = audio.open(
-            format=pyaudio.paInt16,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=CHUNK_SIZE
-        )
+        self.microphone = None
 
     async def recv(self):
+        if self.microphone is None:
+            self.microphone = audio.open(
+                format=pyaudio.paInt16,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                frames_per_buffer=CHUNK_SIZE
+            )
         # 0.2초 단위로 오디오 데이터 읽기 (16000 * 0.2 = 3200 샘플)
         raw_samples = self.microphone.read(CHUNK_SIZE, exception_on_overflow=False)
 
         # 바이트를 numpy 배열로 변환
         samples = np.frombuffer(raw_samples, dtype=np.int16)
-
+        # print(samples.shape)
         # AudioFrame 생성
         frame = AudioFrame.from_ndarray(
-            samples.reshape(-1, self.channels),
+            samples[None, :],
             format="s16",
             layout="mono" if self.channels == 1 else "stereo"
         )
         frame.pts = self.pts
         frame.sample_rate = self.sample_rate
-        frame.time_base = 1 / self.sample_rate
+        frame.time_base = Fraction(1, FPS)
 
         self.pts += CHUNK_SIZE
         return frame
@@ -159,6 +159,7 @@ async def javascript(request):
 async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    print(offer.sdp)
 
     pc = RTCPeerConnection()
     pcs.add(pc)
@@ -188,6 +189,7 @@ async def offer(request):
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
+    print("Answer SDP:\n", pc.localDescription.sdp)
 
     return web.Response(
         content_type="application/json",
