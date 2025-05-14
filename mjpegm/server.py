@@ -11,6 +11,7 @@ HOST = '0.0.0.0'  # 모든 인터페이스에서 연결 허용
 PORT = 9999
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
+# FPS = 25.0
 FPS = 25.0
 
 # 오디오 설정 (안드로이드와 일치해야 할 수 있음)
@@ -59,14 +60,39 @@ def send_data(sock, data_type, timestamp, payload):
         return False
 
 
+def resize_and_crop(frame, target_width=360, target_height=240):
+    original_height, original_width = frame.shape[:2]
+    target_ratio = target_width / target_height
+    original_ratio = original_width / original_height
+
+    # Step 1: 비율 유지하며 리사이즈 (크게 맞춰놓기)
+    if original_ratio > target_ratio:
+        # 원본이 더 가로로 넓음 -> 세로 기준 맞추고 가로는 나중에 자름
+        new_height = target_height
+        new_width = int(original_width * (target_height / original_height))
+    else:
+        # 원본이 더 세로로 높음 -> 가로 기준 맞추고 세로는 나중에 자름
+        new_width = target_width
+        new_height = int(original_height * (target_width / original_width))
+
+    resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
+    # Step 2: 중앙 crop
+    x_start = (new_width - target_width) // 2
+    y_start = (new_height - target_height) // 2
+    cropped = resized[y_start:y_start + target_height, x_start:x_start + target_width]
+
+    return cropped
+
 # --- 비디오 스트리밍 스레드 ---
 def video_stream_thread(sock):
     logging.info("비디오 스트리밍 스레드 시작")
 
+    # 맥북 웹캠은 30fps 고정이라서 그냥 돌아가는 구나~ 정도만 확인하면 OK
     camera = cv2.VideoCapture(0)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_WIDTH)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_HEIGHT)
-    camera.set(cv2.CAP_PROP_FPS, FPS)
+    # camera.set(cv2.CAP_PROP_FPS, FPS)
 
     try:
         # picam2 = Picamera2()
@@ -77,7 +103,7 @@ def video_stream_thread(sock):
         # )
         # picam2.configure(config)
         # picam2.start()
-        # time.sleep(2)  # 카메라 안정화 시간
+        time.sleep(1)  # 카메라 안정화 시간
 
         frame_interval = 1.0 / FPS
         start_time = time.monotonic()  # 루프 시작 시간 기록
@@ -85,12 +111,17 @@ def video_stream_thread(sock):
         while not stop_event.is_set():
             ts = time.time_ns()  # 데이터 타임스탬프
 
+            time1 = time.monotonic()
             # 프레임 캡처 (배열로)
             # frame_array = picam2.capture_array()  # RGB 형식
             ret, frame_array = camera.read()
             if not ret:
                 print('?')
                 break
+            time2 = time.monotonic()
+
+            frame_array = resize_and_crop(frame_array)
+            time3 = time.monotonic()
             # print('shape:', frame_array.shape)
 
             # OpenCV를 사용하여 MJPEG(JPEG)으로 인코딩
@@ -102,6 +133,7 @@ def video_stream_thread(sock):
             # BGR 형식으로 가정하고 인코딩
             is_success, img_encoded = cv2.imencode('.jpg', frame_array, [int(cv2.IMWRITE_JPEG_QUALITY), 90])  # 품질 90
 
+            time4 = time.monotonic()
             if is_success:
                 frame_data = img_encoded.tobytes()
                 if not send_data(sock, TYPE_VIDEO, ts, frame_data):
@@ -109,16 +141,18 @@ def video_stream_thread(sock):
                     break  # 전송 실패 시 루프 종료
             else:
                 logging.warning("JPEG 인코딩 실패")
-
+            time5 = time.monotonic()
+            # print(time2-time1, time3-time2, time4-time3, time5-time4, is_success)
             # FPS 유지 로직
             elapsed_time = time.monotonic() - start_time
             sleep_time = frame_interval - elapsed_time
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                # time.sleep(sleep_time)
+                # print('sleep time:', sleep_time)
                 start_time += frame_interval
             else:
                 current_time = time.monotonic()
-                logging.warning(f'시간 재설정 {current_time} {-sleep_time} {current_time - start_time - frame_interval} 딜레이')
+                logging.warning(f'시간 재설정 {elapsed_time} {current_time} {-sleep_time} {current_time - start_time - frame_interval} 딜레이')
                 start_time = current_time
 
             # else:
